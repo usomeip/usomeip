@@ -1,0 +1,53 @@
+from building import *
+
+for sc in Glob('*/SConscript'):
+    SConscript(sc)
+
+CWD = GetCurrentDir()
+
+generate(Glob('config/Net/*.json'))
+
+objsApp = Glob('*.c') + Glob('src/*.c')
+
+libsForNetApp = {
+    'SoAd': Glob('config/Net/GEN/SoAd_*.c') + Glob('config/Net/GEN/NetMem.c'),
+    'Sd': Glob('config/Net/GEN/Sd_*.c'),
+    'SomeIp': Glob('config/Net/GEN/SomeIp_*.c') + Glob('config/Net/GEN/SS_*.c') + Glob('config/Net/GEN/CS_*.c')
+}
+
+libsForNetAppT = {
+    'SoAd': Glob('config/Net/GENT/SoAd_*.c') + Glob('config/Net/GEN/NetMem.c'),
+    'Sd': Glob('config/Net/GENT/Sd_*.c'),
+    'SomeIp': Glob('config/Net/GENT/SomeIp_*.c') + Glob('config/Net/GENT/SS_*.c') + Glob('config/Net/GENT/CS_*.c'),
+}
+
+
+@register_application
+class ApplicationNetApp(Application):
+    mylibs = libsForNetApp
+
+    def platform_config(self):
+        self.Append(CPPDEFINES=['USE_STD_DEBUG'])
+        self.LIBS.append('Simulator')
+
+    def config(self):
+        self.CPPPATH = ['$INFRAS', '%s/include' % (CWD)]
+        self.source = objsApp
+        self.LIBS = ['TcpIp', 'StdTimer']
+        self.Append(CPPDEFINES=['USE_TCPIP'])
+        self.platform_config()
+        for libName, source in self.mylibs.items():
+            self.LIBS.append(libName)
+            self.RegisterConfig(libName, source)
+            self.Append(CPPDEFINES=['USE_%s' %
+                        (libName.split(':')[0].upper())])
+
+
+@register_application
+class ApplicationNetAppT(query_application('NetApp')):
+    mylibs = libsForNetAppT
+
+    def config(self):
+        super().config()
+        self.Append(CPPDEFINES=['LWIP_AS_LOCAL_IP_TEST'])
+        self.Append(CPPPATH=['%s/config/Net/GEN' % (CWD)])
