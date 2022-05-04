@@ -17,21 +17,23 @@ typedef void (*SomeIp_OnAvailabilityFncType)(boolean isAvailable);
 typedef void (*SomeIp_OnSubscribeFncType)(boolean isSubscribe);
 
 /* API for method */
-typedef Std_ReturnType (*SomeIp_OnRequestFncType)(uint16_t conId, SomeIp_MessageType *req,
+typedef Std_ReturnType (*SomeIp_OnRequestFncType)(uint32_t requestId, SomeIp_MessageType *req,
                                                   SomeIp_MessageType *res);
-typedef Std_ReturnType (*SomeIp_OnFireForgotFncType)(uint16_t conId, SomeIp_MessageType *req);
-typedef Std_ReturnType (*SomeIp_OnAsyncRequestFncType)(uint16_t conId, SomeIp_MessageType *res);
+typedef Std_ReturnType (*SomeIp_OnFireForgotFncType)(uint32_t requestId, SomeIp_MessageType *req);
+typedef Std_ReturnType (*SomeIp_OnAsyncRequestFncType)(uint32_t requestId, SomeIp_MessageType *res);
 
 /* For the LF, set the msg->data as beginning of the buffer */
-typedef Std_ReturnType (*SomeIp_OnTpCopyRxDataFncType)(uint16_t conId, SomeIp_TpMessageType *msg);
+typedef Std_ReturnType (*SomeIp_OnTpCopyRxDataFncType)(uint32_t requestId,
+                                                       SomeIp_TpMessageType *msg);
 
-typedef Std_ReturnType (*SomeIp_OnTpCopyTxDataFncType)(uint16_t conId, SomeIp_TpMessageType *msg);
+typedef Std_ReturnType (*SomeIp_OnTpCopyTxDataFncType)(uint32_t requestId,
+                                                       SomeIp_TpMessageType *msg);
 
-typedef Std_ReturnType (*SomeIp_OnResponseFncType)(SomeIp_MessageType *res);
-typedef Std_ReturnType (*SomeIp_OnErrorFncType)(Std_ReturnType ercd);
+typedef Std_ReturnType (*SomeIp_OnResponseFncType)(uint32_t requestId, SomeIp_MessageType *res);
+typedef Std_ReturnType (*SomeIp_OnErrorFncType)(uint32_t requestId, Std_ReturnType ercd);
 
 /* API for events */
-typedef Std_ReturnType (*SomeIp_OnNotificationFncType)(SomeIp_MessageType *evt);
+typedef Std_ReturnType (*SomeIp_OnNotificationFncType)(uint32_t requestId, SomeIp_MessageType *evt);
 
 typedef struct {
   uint16_t methodId;
@@ -134,6 +136,7 @@ typedef struct SomeIp_TxTpEvtMsg_s {
   uint32_t offset;
   uint32_t length;
   uint16_t eventId; /* this is the key */
+  uint16_t sessionId;
   uint16_t timer;
 } SomeIp_TxTpEvtMsgType;
 
@@ -171,7 +174,6 @@ typedef struct {
   SomeIp_RxTpMsgList pendingRxTpMsgs;
   SomeIp_TxTpMsgList pendingTxTpMsgs;
   SomeIp_WaitResMsgList pendingWaitResMsgs;
-  uint16_t sessionId;
   bool online;
 } SomeIp_ClientServiceContextType;
 
