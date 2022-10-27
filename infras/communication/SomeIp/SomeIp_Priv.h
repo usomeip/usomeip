@@ -12,6 +12,8 @@
 /* ================================ [ TYPES     ] ============================================== */
 /* API for service */
 typedef void (*SomeIp_OnAvailabilityFncType)(boolean isAvailable);
+typedef void (*SomeIp_OnConnectFncType)(uint16_t condId, boolean isConnected);
+
 
 /* for events */
 typedef void (*SomeIp_OnSubscribeFncType)(boolean isSubscribe);
@@ -23,9 +25,9 @@ typedef Std_ReturnType (*SomeIp_OnFireForgotFncType)(uint32_t requestId, SomeIp_
 typedef Std_ReturnType (*SomeIp_OnAsyncRequestFncType)(uint32_t requestId, SomeIp_MessageType *res);
 
 /* For the LF, set the msg->data as beginning of the buffer */
+/* msg == NULL to indicate transmission error, abort current transmit */
 typedef Std_ReturnType (*SomeIp_OnTpCopyRxDataFncType)(uint32_t requestId,
                                                        SomeIp_TpMessageType *msg);
-
 typedef Std_ReturnType (*SomeIp_OnTpCopyTxDataFncType)(uint32_t requestId,
                                                        SomeIp_TpMessageType *msg);
 
@@ -167,6 +169,7 @@ typedef struct {
   SomeIp_TxTpMsgList pendingTxTpMsgs;
   SomeIp_TxTpEvtMsgList pendingTxTpEvtMsgs;
   bool online;
+  bool takenControled;
 } SomeIp_ServerConnectionContextType;
 
 typedef struct {
@@ -201,6 +204,7 @@ typedef struct {
   TcpIp_ProtocolType protocol;
   SomeIp_ServerContextType *context;
   uint16_t SeparationTime; /* @ECUC_SomeIpTp_00006 */
+  SomeIp_OnConnectFncType onConnect;
 } SomeIp_ServerServiceType;
 
 typedef struct {

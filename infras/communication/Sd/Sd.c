@@ -134,6 +134,9 @@ extern const Sd_ConfigType Sd_Config;
 
 static void Sd_InitClientServiceConsumedEventGroups(const Sd_ClientServiceType *config,
                                                     boolean soft);
+
+extern Std_ReturnType SomeIp_ResolveSubscriber(uint16_t ServiceId,
+                                               Sd_EventHandlerSubscriberType *sub);
 /* ================================ [ DATAS     ] ============================================== */
 /* ================================ [ LOCALS    ] ============================================== */
 static uint16_t Sd_RandTime(uint16_t min, uint16_t max) {
@@ -525,7 +528,7 @@ static Std_ReturnType Sd_HandleFindService(const Sd_InstanceType *Instance,
 
   if ((E_OK == ret) &&
       ((SD_PHASE_DOWN != context->phase) || (context->flags & SD_FLG_STATE_REQUEST_ONLINE))) {
-    Sd_BuildEntryType1(&Instance->buffer[24], SD_OFFER_SERVICE, 1, 0, 1, 0, config->ServiceId,
+    Sd_BuildEntryType1(&Instance->buffer[24], SD_OFFER_SERVICE, 0, 0, 1, 0, config->ServiceId,
                        config->InstanceId, config->MajorVersion, config->MinorVersion,
                        config->ServerTimer->TTL);
     (void)SoAd_GetLocalAddr(config->SoConId, &LocalAddr, NULL, NULL);
@@ -585,12 +588,14 @@ static Std_ReturnType Sd_HandleOfferService(const Sd_InstanceType *Instance,
     }
   }
 
+#if !defined(_WIN32)
   if (E_OK == ret) {
     if (0 != memcmp(ipv4Opt->Addr.addr, RemoteAddr->addr, sizeof(RemoteAddr->addr))) {
-      ASLOG(SDE, ("ipv4 addr not matched\n"));
+      ASLOG(SDE, ("offer: ipv4 addr not matched\n"));
       ret = E_NOT_OK;
     }
   }
+#endif
 
   if (E_OK == ret) {
     if (context->isOffered) {
@@ -609,6 +614,10 @@ static Std_ReturnType Sd_HandleOfferService(const Sd_InstanceType *Instance,
       ASLOG(SDE, ("%d.%d.%d.%d:%d reboot detected, session ID %d <= %d\n", ipv4Opt->Addr.addr[0],
                   ipv4Opt->Addr.addr[1], ipv4Opt->Addr.addr[2], ipv4Opt->Addr.addr[3],
                   ipv4Opt->Addr.port, header->sessionId, context->sessionId));
+      if (SD_FLG_LINK_UP & context->flags) {
+        SoAd_CloseSoCon(config->SoConId, TRUE);
+        SD_CLEAR(context->flags, SD_FLG_LINK_UP);
+      }
       Sd_InitClientServiceConsumedEventGroups(config, TRUE);
     }
     context->sessionId = header->sessionId;
@@ -715,14 +724,14 @@ static Std_ReturnType Sd_HandleSubscribeEventGroup(const Sd_InstanceType *Instan
       ret = E_NOT_OK;
     }
   }
-
+#if !defined(_WIN32)
   if (E_OK == ret) {
     if (0 != memcmp(ipv4Opt->Addr.addr, RemoteAddr->addr, sizeof(RemoteAddr->addr))) {
-      ASLOG(SDE, ("ipv4 addr not matched\n"));
+      ASLOG(SDE, ("sub: ipv4 addr not matched\n"));
       ret = E_NOT_OK;
     }
   }
-
+#endif
   if (E_OK == ret) {
     sub = Sd_LookupSubscribe(EventHandler, &ipv4Opt->Addr);
     if (NULL == sub) {
@@ -737,6 +746,24 @@ static Std_ReturnType Sd_HandleSubscribeEventGroup(const Sd_InstanceType *Instan
     if (entry2->TTL > 0) {
       sub->RemoteAddr = ipv4Opt->Addr;
       sub->port = RemoteAddr->port;
+      ret = SomeIp_ResolveSubscriber(config->SomeIpServiceId, sub);
+      if (E_OK != ret) {
+        ASLOG(SDE, ("can't resolve subscriber %d.%d.%d.%d:%d\n", sub->RemoteAddr.addr[0],
+                    sub->RemoteAddr.addr[1], sub->RemoteAddr.addr[2], sub->RemoteAddr.addr[3],
+                    sub->RemoteAddr.port));
+        if (SD_FLG_EVENT_GROUP_UNSUBSCRIBED != sub->flags) {
+          EventHandler->onSubscribe(FALSE, &sub->RemoteAddr);
+          if (EventHandler->context->numOfSubscribers > 0) {
+            EventHandler->context->numOfSubscribers--;
+          }
+        }
+        sub->flags = 0;
+      }
+    }
+  }
+
+  if (E_OK == ret) {
+    if (entry2->TTL > 0) {
       if (SD_FLG_EVENT_GROUP_UNSUBSCRIBED == sub->flags) {
         EventHandler->context->numOfSubscribers++;
         EventHandler->onSubscribe(TRUE, &sub->RemoteAddr);
@@ -752,12 +779,15 @@ static Std_ReturnType Sd_HandleSubscribeEventGroup(const Sd_InstanceType *Instan
       if (DEFAULT_TTL != entry2->TTL) {
         sub->TTL = SD_CONVERT_MS_TO_MAIN_CYCLES(entry2->TTL * 1000);
       }
+
     } else {
-      sub->flags = 0;
-      if (EventHandler->context->numOfSubscribers > 0) {
-        EventHandler->context->numOfSubscribers--;
+      if (SD_FLG_EVENT_GROUP_UNSUBSCRIBED != sub->flags) {
+        EventHandler->onSubscribe(FALSE, &sub->RemoteAddr);
+        if (EventHandler->context->numOfSubscribers > 0) {
+          EventHandler->context->numOfSubscribers--;
+        }
       }
-      EventHandler->onSubscribe(FALSE, &sub->RemoteAddr);
+      sub->flags = 0;
     }
   }
 
@@ -880,6 +910,24 @@ static void Sd_InitServerServiceEventHandlers(const Sd_ServerServiceType *config
   }
 }
 
+static void Sd_ReInitServerServiceEventHandlers(const Sd_ServerServiceType *config) {
+  uint16_t i, j;
+  const Sd_EventHandlerType *EventHandler;
+  Sd_EventHandlerSubscriberType *sub;
+  for (i = 0; i < config->numOfEventHandlers; i++) {
+    EventHandler = &config->EventHandlers[i];
+    memset(EventHandler->context, 0, sizeof(Sd_EventHandlerContextType));
+    for (j = 0; j < EventHandler->numOfSubscribers; j++) {
+      sub = &EventHandler->Subscribers[j];
+      if (SD_FLG_EVENT_GROUP_UNSUBSCRIBED != sub->flags) {
+        EventHandler->onSubscribe(FALSE, &sub->RemoteAddr);
+      }
+    }
+    memset(EventHandler->Subscribers, 0,
+           EventHandler->numOfSubscribers * sizeof(Sd_EventHandlerSubscriberType));
+  }
+}
+
 static void Sd_InitServerService(const Sd_InstanceType *Instance) {
   uint16_t i;
   const Sd_ServerServiceType *config;
@@ -964,7 +1012,7 @@ static void Sd_ServerServiceMain_InitialWait(const Sd_InstanceType *Instance,
   Sd_ServerServiceContextType *context = config->context;
   if (0 == (context->flags & SD_FLG_STATE_REQUEST_ONLINE)) {
     context->offerTimer = 0;
-    Sd_InitServerServiceEventHandlers(config);
+    Sd_ReInitServerServiceEventHandlers(config);
     context->phase = SD_PHASE_DOWN;
   } else {
     if (context->offerTimer > 0) {
@@ -995,7 +1043,7 @@ static void Sd_ServerServiceMain_Repetition(const Sd_InstanceType *Instance,
   Sd_ServerServiceContextType *context = config->context;
   if (0 == (context->flags & SD_FLG_STATE_REQUEST_ONLINE)) {
     SD_SET(context->flags, SD_FLG_PENDING_STOP_OFFER);
-    Sd_InitServerServiceEventHandlers(config);
+    Sd_ReInitServerServiceEventHandlers(config);
     context->offerTimer = 0;
     context->phase = SD_PHASE_DOWN;
   } else {
@@ -1023,7 +1071,7 @@ static void Sd_ServerServiceMain_Main(const Sd_InstanceType *Instance,
                                       const Sd_ServerServiceType *config) {
   Sd_ServerServiceContextType *context = config->context;
   if (0 == (context->flags & SD_FLG_STATE_REQUEST_ONLINE)) {
-    Sd_InitServerServiceEventHandlers(config);
+    Sd_ReInitServerServiceEventHandlers(config);
     SD_SET(context->flags, SD_FLG_PENDING_STOP_OFFER);
     context->offerTimer = 0;
     context->phase = SD_PHASE_DOWN;
@@ -1171,6 +1219,8 @@ static void Sd_ConsumedEventGroupTTLStart(const Sd_ConsumedEventGroupType *Consu
     if (ConsumedEventGroup->context->TTL > SD_CONVERT_MS_TO_MAIN_CYCLES(100)) {
       ConsumedEventGroup->context->TTL -= SD_CONVERT_MS_TO_MAIN_CYCLES(100);
     }
+    ASLOG(SD, ("start ConsumedEventGroup %x:%x timer = %u\n", ConsumedEventGroup->EventGroupId,
+               ConsumedEventGroup->HandleId, ConsumedEventGroup->context->TTL));
   }
 }
 
@@ -1185,13 +1235,12 @@ static void Sd_ClientServiceMain_Main(const Sd_InstanceType *Instance,
     for (i = 0; i < config->numOfConsumedEventGroups; i++) {
       ConsumedEventGroup = &config->ConsumedEventGroups[i];
       if (ConsumedEventGroup->context->flags & SD_FLG_STATE_REQUEST_ONLINE) {
-        if (FALSE == ConsumedEventGroup->context->isSubscribed) {
-          if (0 == (ConsumedEventGroup->context->flags & SD_FLG_STATE_REQUEST_ONCE)) {
-            SD_SET_CLEAR(ConsumedEventGroup->context->flags,
-                         SD_FLG_PENDING_SUBSCRIBE | SD_FLG_STATE_REQUEST_ONCE,
-                         SD_FLG_PENDING_STOP_SUBSCRIBE);
-            Sd_ConsumedEventGroupTTLStart(ConsumedEventGroup, config);
-          }
+        if ((FALSE == ConsumedEventGroup->context->isSubscribed) &&
+            (0 == (ConsumedEventGroup->context->flags & SD_FLG_STATE_REQUEST_ONCE))) {
+          SD_SET_CLEAR(ConsumedEventGroup->context->flags,
+                       SD_FLG_PENDING_SUBSCRIBE | SD_FLG_STATE_REQUEST_ONCE,
+                       SD_FLG_PENDING_STOP_SUBSCRIBE);
+          Sd_ConsumedEventGroupTTLStart(ConsumedEventGroup, config);
         } else {
           if (ConsumedEventGroup->context->TTL > 0) {
             ConsumedEventGroup->context->TTL--;
@@ -1264,29 +1313,32 @@ static void Sd_ServerServiceOfferBuild(const Sd_InstanceType *Instance, uint32_t
   Sd_ServerServiceContextType *context;
   TcpIp_SockAddrType LocalAddr;
   uint32_t TTL;
+  Std_ReturnType ret;
 
   for (i = 0; i < Instance->numOfServerServices; i++) {
     config = &Instance->ServerServices[i];
     context = config->context;
     if (context->flags & (SD_FLG_PENDING_OFFER | SD_FLG_PENDING_STOP_OFFER)) {
       if (*freeSpace >= 28) {
-        if (context->flags & SD_FLG_PENDING_STOP_OFFER) {
-          TTL = 0;
-        } else {
-          TTL = config->ServerTimer->TTL;
-        }
-        SD_CLEAR(context->flags, SD_FLG_PENDING_OFFER | SD_FLG_PENDING_STOP_OFFER);
-        Sd_BuildEntryType1(&Instance->buffer[*offsetOfEntries], SD_OFFER_SERVICE, *numOfOptions, 0,
-                           1, 0, config->ServiceId, config->InstanceId, config->MajorVersion,
-                           config->MinorVersion, TTL);
         /* @SWS_SD_00416 */
-        (void)SoAd_GetLocalAddr(config->SoConId, &LocalAddr, NULL, NULL);
-        Sd_BuildOptionIPv4Endpoint(&Instance->buffer[*offsetOfOptions], &LocalAddr,
-                                   config->ProtocolType);
-        *offsetOfEntries += 16;
-        *offsetOfOptions += 12;
-        *numOfOptions += 1;
-        *freeSpace -= 28;
+        ret = SoAd_GetLocalAddr(config->SoConId, &LocalAddr, NULL, NULL);
+        if (E_OK == ret) {
+          if (context->flags & SD_FLG_PENDING_STOP_OFFER) {
+            TTL = 0;
+          } else {
+            TTL = config->ServerTimer->TTL;
+          }
+          SD_CLEAR(context->flags, SD_FLG_PENDING_OFFER | SD_FLG_PENDING_STOP_OFFER);
+          Sd_BuildEntryType1(&Instance->buffer[*offsetOfEntries], SD_OFFER_SERVICE, *numOfOptions,
+                             0, 1, 0, config->ServiceId, config->InstanceId, config->MajorVersion,
+                             config->MinorVersion, TTL);
+          Sd_BuildOptionIPv4Endpoint(&Instance->buffer[*offsetOfOptions], &LocalAddr,
+                                     config->ProtocolType);
+          *offsetOfEntries += 16;
+          *offsetOfOptions += 12;
+          *numOfOptions += 1;
+          *freeSpace -= 28;
+        }
       } else {
         break;
       }
@@ -1467,20 +1519,27 @@ Sd_SendSubscribeEventGroup(const Sd_InstanceType *Instance, const Sd_ClientServi
   Sd_BuildEntryType2(&Instance->buffer[24], SD_SUBSCRIBE_EVENT_GROUP, 0, 0, 1, 0, config->ServiceId,
                      config->InstanceId, config->MajorVersion, 0, ConsumedEventGroup->EventGroupId,
                      TTL);
-  (void)SoAd_GetLocalAddr(config->SoConId, &LocalAddr, NULL, NULL);
-  Sd_BuildOptionIPv4Endpoint(&Instance->buffer[44], &LocalAddr, config->ProtocolType);
-  Sd_BuildHeader(Instance->buffer, Instance->context->flags, Instance->context->multicastSessionId,
-                 16, 12);
-  Instance->context->multicastSessionId++;
-  if (0 == Instance->context->multicastSessionId) {
-    Instance->context->multicastSessionId = 1;
-    Instance->context->flags &= ~SD_REBOOT_FLAG;
-  }
-  memcpy(LocalAddr.addr, config->context->RemoteAddr.addr, 4);
-  LocalAddr.port = config->context->port;
-  ret = Sd_Transmit(Instance->TxPdu.UnicastTxPduId, Instance->buffer, 56, &LocalAddr);
-  if (E_OK != ret) {
-    ASLOG(SDE, ("Sending Subscribe Event Group Ack Failed\n"));
+  ret = SoAd_GetLocalAddr(config->SoConId, &LocalAddr, NULL, NULL);
+  if (E_OK == ret) {
+    Sd_BuildOptionIPv4Endpoint(&Instance->buffer[44], &LocalAddr, config->ProtocolType);
+    Sd_BuildHeader(Instance->buffer, Instance->context->flags,
+                   Instance->context->multicastSessionId, 16, 12);
+    Instance->context->multicastSessionId++;
+    if (0 == Instance->context->multicastSessionId) {
+      Instance->context->multicastSessionId = 1;
+      Instance->context->flags &= ~SD_REBOOT_FLAG;
+    }
+#if (defined(_WIN32) || defined(linux)) && !defined(USE_LWIP)
+    /* NOTE: this is a workaroud for case that server and client on the same host */
+    ret = Sd_Transmit(Instance->TxPdu.MulticastTxPduId, Instance->buffer, 56, NULL);
+#else
+    memcpy(LocalAddr.addr, config->context->RemoteAddr.addr, 4);
+    LocalAddr.port = config->context->port;
+    ret = Sd_Transmit(Instance->TxPdu.UnicastTxPduId, Instance->buffer, 56, &LocalAddr);
+#endif
+    if (E_OK != ret) {
+      ASLOG(SDE, ("Sending Subscribe Event Group Ack Failed\n"));
+    }
   }
 
   return ret;
@@ -1692,6 +1751,33 @@ Std_ReturnType Sd_GetSubscribers(uint16_t EventHandlerId,
     ret = E_NOT_OK;
   }
   return ret;
+}
+
+void Sd_RemoveSubscriber(uint16_t EventHandlerId, PduIdType TxPduId) {
+  uint16_t index;
+  const Sd_ServerServiceType *config;
+  const Sd_EventHandlerType *EventHandler;
+  Sd_EventHandlerSubscriberType *sub;
+  if (EventHandlerId < SD_CONFIG->numOfEventHandlers) {
+    index = SD_CONFIG->EventHandlersMap[EventHandlerId];
+    config = SD_CONFIG->ServerServicesMap[index];
+    index = SD_CONFIG->PerServiceEventHandlerMap[EventHandlerId];
+    EventHandler = &config->EventHandlers[index];
+    if (EventHandler->context->numOfSubscribers > 0) {
+      for (index = 0; index < EventHandler->numOfSubscribers; index++) {
+        sub = &EventHandler->Subscribers[index];
+        if (sub->flags != SD_FLG_EVENT_GROUP_UNSUBSCRIBED) {
+          if (sub->TxPduId == TxPduId) {
+            sub->flags = 0;
+            EventHandler->onSubscribe(FALSE, &sub->RemoteAddr);
+            if (EventHandler->context->numOfSubscribers > 0) {
+              EventHandler->context->numOfSubscribers--;
+            }
+          }
+        }
+      }
+    }
+  }
 }
 
 Std_ReturnType Sd_GetProviderAddr(uint16_t ClientServiceHandleId, TcpIp_SockAddrType *RemoteAddr) {

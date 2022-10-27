@@ -12,13 +12,13 @@ objsApp = Glob('*.c') + Glob('src/*.c')
 libsForNetApp = {
     'SoAd': Glob('config/Net/GEN/SoAd_*.c') + Glob('config/Net/GEN/NetMem.c'),
     'Sd': Glob('config/Net/GEN/Sd_*.c'),
-    'SomeIp': Glob('config/Net/GEN/SomeIp_*.c') + Glob('config/Net/GEN/SS_*.c') + Glob('config/Net/GEN/CS_*.c')
+    'SomeIp': Glob('config/Net/GEN/SomeIp_*.c') + Glob('config/Net/GEN/SS_*.cpp') + Glob('config/Net/GEN/CS_*.cpp'),
 }
 
 libsForNetAppT = {
-    'SoAd': Glob('config/Net/GENT/SoAd_*.c') + Glob('config/Net/GEN/NetMem.c'),
+    'SoAd': Glob('config/Net/GENT/SoAd_*.c'),
     'Sd': Glob('config/Net/GENT/Sd_*.c'),
-    'SomeIp': Glob('config/Net/GENT/SomeIp_*.c') + Glob('config/Net/GENT/SS_*.c') + Glob('config/Net/GENT/CS_*.c'),
+    'SomeIp': Glob('config/Net/GENT/SomeIp_*.c') + Glob('config/Net/GENT/SS_*.cpp') + Glob('config/Net/GENT/CS_*.cpp'),
 }
 
 
@@ -27,8 +27,8 @@ class ApplicationNetApp(Application):
     mylibs = libsForNetApp
 
     def platform_config(self):
-        self.Append(CPPDEFINES=['USE_STD_DEBUG'])
-        self.LIBS.append('Simulator')
+        self.Append(CPPDEFINES=['USE_STD_DEBUG', 'USE_PLUGIN'])
+        self.LIBS += ['Simulator', 'Plugin']
 
     def config(self):
         self.CPPPATH = ['$INFRAS', '%s/include' % (CWD)]
@@ -43,6 +43,9 @@ class ApplicationNetApp(Application):
                         (libName.split(':')[0].upper())])
 
 
+netMemSrc = Glob('config/Net/GEN/NetMem.c')
+
+
 @register_application
 class ApplicationNetAppT(query_application('NetApp')):
     mylibs = libsForNetAppT
@@ -51,3 +54,4 @@ class ApplicationNetAppT(query_application('NetApp')):
         super().config()
         self.Append(CPPDEFINES=['LWIP_AS_LOCAL_IP_TEST'])
         self.Append(CPPPATH=['%s/config/Net/GEN' % (CWD)])
+        self.source += netMemSrc

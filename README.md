@@ -16,7 +16,7 @@ set USE_LWIP=YES
 # on my PC, it's zero, but on your PC, it's maybe not
 # and please staticly configured its ipv4 address to 172.18.0.1
 set PACKET_LIB_ADAPTER_NR=0
-scons --app=NetApp --os=FreeRTOS
+scons --app=NetApp --os=FreeRTOS --net=LWIP
 
 # The NetAppT is built with host windows sockets
 set USE_LWIP=

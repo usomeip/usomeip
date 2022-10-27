@@ -9,6 +9,9 @@
 /* ================================ [ INCLUDES  ] ============================================== */
 #include "ComStack_Types.h"
 #include "TcpIp.h"
+#ifdef __cplusplus
+extern "C" {
+#endif
 /* ================================ [ MACROS    ] ============================================== */
 #define SOAD_MEAS_DROP_TCP ((SoAd_MeasurementIdxType)0x01)
 #define SOAD_MEAS_DROP_UDP ((SoAd_MeasurementIdxType)0x02)
@@ -96,4 +99,12 @@ Std_ReturnType SoAd_SetRemoteAddr(SoAd_SoConIdType SoConId,
 
 /* @SWS_SoAd_00121 */
 void SoAd_MainFunction(void);
+
+Std_ReturnType SoAd_TakeControl(SoAd_SoConIdType SoConId);
+Std_ReturnType SoAd_SetNonBlock(SoAd_SoConIdType SoConId, boolean nonBlocked);
+Std_ReturnType SoAd_SetTimeout(SoAd_SoConIdType SoConId, uint32_t timeoutMs);
+Std_ReturnType SoAd_ControlRx(SoAd_SoConIdType SoConId, uint8_t* data, uint32_t length);
+#ifdef __cplusplus
+}
+#endif
 #endif /* _SOAD_H */

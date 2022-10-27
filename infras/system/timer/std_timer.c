@@ -4,7 +4,18 @@
  */
 /* ================================ [ INCLUDES  ] ============================================== */
 #include "Std_Timer.h"
-#include "assert.h"
+#include <assert.h>
+#if defined(linux) || defined(_WIN32)
+#if defined(_WIN32)
+#include <windows.h>
+#include <mmsystem.h>
+#include <synchapi.h>
+#endif
+#include <sys/time.h>
+#include <time.h>
+#include <unistd.h>
+#include <stdlib.h>
+#endif
 /* ================================ [ MACROS    ] ============================================== */
 #define STD_TIMER_STARTED 1
 #define STD_TIMER_SET_NO_OVERFLOW 2
@@ -15,7 +26,46 @@
 /* ================================ [ DECLARES  ] ============================================== */
 /* ================================ [ DATAS     ] ============================================== */
 /* ================================ [ LOCALS    ] ============================================== */
+#if defined(_WIN32)
+static void __std_timer_deinit(void) {
+  TIMECAPS xTimeCaps;
+
+  if (timeGetDevCaps(&xTimeCaps, sizeof(xTimeCaps)) == MMSYSERR_NOERROR) {
+    /* Match the call to timeBeginPeriod( xTimeCaps.wPeriodMin ) made when
+    the process started with a timeEndPeriod() as the process exits. */
+    timeEndPeriod(xTimeCaps.wPeriodMin);
+  }
+}
+
+static void __attribute__((constructor)) __std_timer_init(void) {
+  TIMECAPS xTimeCaps;
+  if (timeGetDevCaps(&xTimeCaps, sizeof(xTimeCaps)) == MMSYSERR_NOERROR) {
+    timeBeginPeriod(xTimeCaps.wPeriodMin);
+    atexit(__std_timer_deinit);
+  }
+}
+#endif
 /* ================================ [ FUNCTIONS ] ============================================== */
+#if defined(linux) || defined(_WIN32)
+std_time_t Std_GetTime(void) {
+  struct timeval now;
+  std_time_t tm;
+
+  (void)gettimeofday(&now, NULL);
+  tm = (std_time_t)(now.tv_sec * 1000000 + now.tv_usec);
+
+  return tm;
+}
+
+void Std_Sleep(std_time_t time) {
+#if defined(_WIN32)
+  Sleep(time / 1000);
+#else
+  usleep(time);
+#endif
+}
+#endif
+
 void Std_TimerStart(Std_TimerType *timer) {
   timer->status = STD_TIMER_STARTED;
   timer->time = Std_GetTime();

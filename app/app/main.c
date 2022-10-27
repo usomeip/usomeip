@@ -7,9 +7,7 @@
 #include "Std_Timer.h"
 #include <string.h>
 #include <assert.h>
-#if defined(_WIN32)
-#include <unistd.h>
-#endif
+
 
 
 #include "TcpIp.h"
@@ -17,9 +15,12 @@
 #include "Sd.h"
 #include "SomeIp.h"
 
-#ifdef USE_FREERTOS
-#include "FreeRTOS.h"
-#include "task.h"
+#ifdef USE_PLUGIN
+#include "plugin.h"
+#endif
+
+#ifdef USE_OSAL
+#include "osal.h"
 #endif
 /* ================================ [ MACROS    ] ============================================== */
 /* ================================ [ TYPES     ] ============================================== */
@@ -30,6 +31,8 @@ static Std_TimerType timer10ms;
 static void MainTask_10ms(void) {
   Sd_MainFunction();
   SomeIp_MainFunction();
+
+  plugin_main();
 }
 
 static void Net_Init(void) {
@@ -37,6 +40,7 @@ static void Net_Init(void) {
   SoAd_Init(NULL);
   Sd_Init(NULL);
   SomeIp_Init(NULL);
+  plugin_init();
 }
 
 void Task_MainLoop(void) {
@@ -50,8 +54,8 @@ void Task_MainLoop(void) {
 
     TcpIp_MainFunction();
     SoAd_MainFunction();
-#ifdef USE_FREERTOS
-    vTaskDelay(1);
+#ifdef USE_OSAL
+    osal_usleep(1000);
 #endif
   }
 }
@@ -59,10 +63,9 @@ void Task_MainLoop(void) {
 int main(int argc, char *argv[]) {
   ASLOG(INFO, ("application build @ %s %s\n", __DATE__, __TIME__));
 
-#ifdef USE_FREERTOS
-  xTaskCreate((TaskFunction_t)Task_MainLoop, "MainLoop", configMINIMAL_STACK_SIZE, NULL,
-              tskIDLE_PRIORITY + 1, NULL);
-  vTaskStartScheduler();
+#ifdef USE_OSAL
+  osal_thread_create((osal_thread_entry_t)Task_MainLoop, NULL);
+  osal_start();
 #else
   Task_MainLoop();
 #endif

@@ -33,6 +33,12 @@ AddOption('--os',
           default=None,
           help='to choose which os to be used')
 
+AddOption('--net',
+          dest='net',
+          type=str,
+          default='none',
+          help='to choose which net(lwip or none) to be used')
+
 AddOption('--cpl',
           dest='compiler',
           type=str,
@@ -141,7 +147,13 @@ class Win32Spawn:
 
 def IsBuildForWindows():
     if IsPlatformWindows():
-        return GetOption('compiler') in ['GCC', 'MSVC']
+        return GetOption('compiler') in ['GCC', 'MSVC', 'x86GCC']
+    return False
+
+
+def IsBuildForWin32():
+    if IsPlatformWindows():
+        return GetOption('compiler') in ['x86GCC']
     return False
 
 
@@ -150,7 +162,7 @@ def IsBuildForAndroid():
 
 
 def IsBuildForHost():
-    return GetOption('compiler') in ['GCC', 'MSVC', 'NDK']
+    return GetOption('compiler') in ['GCC', 'MSVC', 'NDK', 'x86GCC']
 
 
 def IsPlatformWindows():
@@ -161,6 +173,22 @@ def IsPlatformWindows():
         bYes = True
     return bYes
 
+
+def IsPlatformTermux():
+    bYes = False
+    ver = os.getenv('TERMUX_VERSION')
+    if ver != None:
+        bYes = True
+    return bYes
+
+def GetMsys2Root():
+    rt = os.getenv('MSYS2')
+    if None == rt:
+        if os.path.isdir('c:/msys64'):
+            rt = 'c:/msys64'
+    if None == rt:
+        raise Exception('please specify env MSYS2 root directory')
+    return rt
 
 def MKDir(p):
     ap = os.path.abspath(p)
@@ -363,122 +391,72 @@ def Package(url, ** parameters):
     return pkg
 
 
-class ReleaseEnv():
-    def __init__(self, env):
-        self.env = env
+class CustomEnv(dict):
+    def __init__(self):
+        self.env = Environment(TOOLS=['ar', 'as', 'gcc', 'g++', 'gnulink'])
         self.CPPPATH = []
         self.objs = {}
+
+    def Replace(self, **kwargs):
+        pass
 
     def Append(self, **kwargs):
         self.env.Append(**kwargs)
 
+    def AddPostAction(self, target, action):
+        if not hasattr(self, '__post_actions__'):
+            self.__post_actions__ = []
+        self.__post_actions__.append([target, action])
+
     def get(self, key, default=None):
         return self.env.get(key, default)
 
+    def getKL(self, kwargs, K, L):
+        for x in kwargs.get(K, []):
+            if type(x) is list:
+                for x1 in x:
+                    if x1 not in L:
+                        L.append(x1)
+            else:
+                if x not in L:
+                    L.append(x)
+
     def Object(self, src, **kwargs):
         self.objs[src] = kwargs
-        return src
+        return [src]
+
+    def SharedObject(self, src, **kwargs):
+        aslog('SHCC', src)
+        self.objs[src] = kwargs
+        return [src]
+
+    def Library(self, libName, objs, **kwargs):
+        return ['lib%s.a' % (libName)]
+
+    def SharedLibrary(self, libName, objs, **kwargs):
+        if len(objs) == 1:
+            return objs
+        self.shared = True
+        return self.Program(libName, objs, **kwargs)
 
     def w(self, l):
         self.mkf.write(l)
 
-    def Program(self, appName, objs, **kwargs):
-        self.appName = appName
-        self.cplName = getattr(self, 'compiler', GetOption('compiler'))
-        self.WDIR = '%s/release/%s' % (RootDir, appName)
-        MKDir(self.WDIR)
-        self.GenerateMakefile(objs, **kwargs)
-        self.CopyFiles(objs)
-        print('release %s done!' % (appName))
-        exit()
-
-    def relpath(self, p):
-        p = os.path.relpath(p, RootDir)
-        p = p.replace(os.sep, '/')
+    def relpath(self, p, silent=False):
+        try:
+            p = os.path.relpath(p, RootDir)
+            p = p.replace(os.sep, '/')
+        except Exception as e:
+            if silent:
+                pass
+            else:
+                raise e
         return p
 
-    def link_flags(self, LINKFLAGS):
-        cstr = ''
-        for flg in LINKFLAGS:
-            if '-T' in flg:
-                lds = flg.replace('-T', '').replace('"', '')
-                self.copy(lds)
-                cstr = '%s -T"%s"' % (cstr, self.relpath(lds))
-            elif '-Map=' in flg:
-                ss = flg.split('=')
-                prefix = ss[0]
-                mp = ss[-1].replace('"', '')
-                cstr = '%s %s="%s"' % (cstr, prefix, self.relpath(mp))
-            elif '.map' in flg:
-                cstr = ' '.join([cstr, self.relpath(flg)])
-            else:
-                cstr = ' '.join([cstr, flg])
-        return cstr
-
-    def GenerateMakefile(self, objs, **kwargs):
-        self.mkf = open('%s/Makefile.%s' % (self.WDIR, self.cplName), 'w')
-        self.w('# Makefile for %s\n' % (self.appName))
-        self.w('CC=%s\n' % (os.path.basename(self.env['CC'])))
-        self.w('LD=%s\n' % (os.path.basename(self.env['LINK'])))
-        self.w('ifeq ($V, 1)\n')
-        self.w('Q=\n')
-        self.w('else\n')
-        self.w('Q=@\n')
-        self.w('endif\n')
-        self.w('LINKFLAGS=%s\n' %
-               (self.link_flags(kwargs.get('LINKFLAGS', []))))
-        self.w('LIBS=%s\n' % (' '.join('-l%s' % (i)
-               for i in kwargs.get('LIBS', []))))
-        BUILD_DIR = os.path.join(
-            'build', os.name, self.cplName, self.appName).replace(os.sep, '/')
-        objd = []
-        objm = {}
-        for src in objs:
-            rp = self.relpath(str(src))
-            if rp.endswith('.c') or rp.endswith('.s') or rp.endswith('.S'):
-                obj = rp[:-2]
-            else:
-                raise
-            obj = '%s/%s.o' % (BUILD_DIR, obj)
-            d = os.path.dirname(obj)
-            if d not in objd:
-                objd.append(d)
-            self.w('objs-y += %s\n' % (obj))
-            if src in self.objs:
-                args = self.objs[src]
-            else:
-                args = kwargs
-            for i in args.get('CPPPATH', []):
-                if i not in self.CPPPATH:
-                    self.CPPPATH.append(i)
-            objm[obj] = {'src': rp, 'd': d}
-            objm[obj]['CPPFLAGS'] = ' '.join(args.get('CPPFLAGS', []))
-            objm[obj]['CPPDEFINES'] = ' '.join(
-                ['-D%s' % (i) for i in args.get('CPPDEFINES', [])])
-            objm[obj]['CPPPATH'] = ' '.join(
-                ['-I%s' % (self.relpath(i)) for i in args.get('CPPPATH', [])])
-        self.w('\nall: %s/%s.exe\n' % (BUILD_DIR, self.appName))
-        self.w('%s/%s.exe: $(objs-y)\n' % (BUILD_DIR, self.appName))
-        self.w('\t@echo LD $@\n')
-        self.w('\t$Q $(LD) $(LINKFLAGS) $(objs-y) $(LIBS) -o $@\n\n')
-        if 'S19' in self.env:
-            ss = self.env['S19'].split(' ')
-            ss[0] = os.path.basename(ss[0])
-            s19 = ' '.join(ss)
-            cmd = s19.format('%s/%s.exe' % (BUILD_DIR, self.appName),
-                             '%s/%s.s19' % (BUILD_DIR, self.appName))
-            self.w('\t$Q %s\n\n' % (cmd))
-        for d in objd:
-            self.w('%s:\n\tmkdir -p $@\n' % (d))
-        for obj, m in objm.items():
-            self.w('%s: %s\n' % (m['src'], m['d']))
-            self.w('%s: %s\n' % (obj, m['src']))
-            self.w('\t@echo CC $<\n')
-            self.w('\t$Q $(CC) %s %s %s -c $< -o $@\n' %
-                   (m['CPPFLAGS'], m['CPPDEFINES'], m['CPPPATH']))
-        self.w('\nclean:\n\t@rm -fv $(objs-y) %s/%s.exe\n\n' %
-               (BUILD_DIR, self.appName))
-        self.mkf.close()
+    def abspath(self, p):
+        p = os.path.abspath(p)
+        p = p.replace(os.sep, '/')
+        return p
 
     def copy(self, src):
         rp = self.relpath(src)
@@ -503,9 +481,179 @@ class ReleaseEnv():
         for src in objs:
             self.copy(str(src))
         for cpppath in self.CPPPATH:
-            rp = self.relpath(cpppath)
-            shutil.copytree(cpppath, os.path.join(
-                self.WDIR, rp), dirs_exist_ok=True)
+            try:
+                rp = self.relpath(cpppath)
+                shutil.copytree(cpppath, os.path.join(
+                    self.WDIR, rp), dirs_exist_ok=True)
+            except:
+                pass
+
+
+class ReleaseEnv(CustomEnv):
+    def __init__(self, env):
+        super().__init__()
+        self.env = env
+
+    def Program(self, appName, objs, **kwargs):
+        self.appName = appName
+        self.cplName = getattr(self, 'compiler', GetOption('compiler'))
+        self.WDIR = '%s/release/%s' % (RootDir, appName)
+        MKDir(self.WDIR)
+        self.GenerateMakefile(objs, **kwargs)
+        self.GenerateCMake(objs, **kwargs)
+        self.CopyFiles(objs)
+        print('release %s done!' % (appName))
+        exit()
+
+    def link_flags(self, LINKFLAGS):
+        cstr = ''
+        for flg in LINKFLAGS:
+            if '-T' in flg:
+                lds = flg.replace('-T', '').replace('"', '')
+                self.copy(lds)
+                cstr = '%s -T"%s"' % (cstr, self.relpath(lds))
+            elif '-Map=' in flg:
+                ss = flg.split('=')
+                prefix = ss[0]
+                mp = ss[-1].replace('"', '')
+                cstr = '%s %s="%s"' % (cstr, prefix, self.relpath(mp))
+            elif '.map' in flg:
+                cstr = ' '.join([cstr, self.relpath(flg)])
+            else:
+                cstr = ' '.join([cstr, flg])
+        return cstr
+
+    def GenerateMakefile(self, objs, **kwargs):
+        self.mkf = open('%s/Makefile.%s' % (self.WDIR, self.cplName), 'w')
+        self.w('# Makefile for %s\n' % (self.appName))
+        CC = os.path.basename(self.env['CC'])
+        CXX = os.path.basename(self.env['CXX'])
+        LD = os.path.basename(self.env['LINK'])
+        if LD == '$SMARTLINK':
+            LD = CC
+        self.w('CC=%s\n' % (CC))
+        self.w('LD=%s\n' % (LD))
+        self.w('CXX=%s\n' % (CXX))
+        self.w('ifeq ($V, 1)\n')
+        self.w('Q=\n')
+        self.w('else\n')
+        self.w('Q=@\n')
+        self.w('endif\n')
+        self.w('LINKFLAGS=%s\n' %
+               (self.link_flags(kwargs.get('LINKFLAGS', []))))
+        self.w('LIBS=%s\n' % (' '.join('-l%s' % (i)
+               for i in kwargs.get('LIBS', []))))
+        self.w('LIBPATH=%s\n' % (' '.join('-L"%s"' % (i)
+               for i in kwargs.get('LIBPATH', []))))
+        BUILD_DIR = os.path.join(
+            'build', os.name, self.cplName, self.appName).replace(os.sep, '/')
+        objd = []
+        objm = {}
+        for src in objs:
+            rp = self.relpath(str(src))
+            if rp.endswith('.c') or rp.endswith('.s') or rp.endswith('.S'):
+                obj = rp[:-2]
+            elif rp.endswith('.cpp'):
+                obj = rp[:-4]
+            else:
+                raise Exception('unkown file type %s' % (rp))
+            obj = '%s/%s.o' % (BUILD_DIR, obj)
+            d = os.path.dirname(obj)
+            if d not in objd:
+                objd.append(d)
+            self.w('objs-y += %s\n' % (obj))
+            if src in self.objs:
+                args = self.objs[src]
+            else:
+                args = kwargs
+            for i in args.get('CPPPATH', []):
+                if i not in self.CPPPATH:
+                    self.CPPPATH.append(i)
+            objm[obj] = {'src': rp, 'd': d}
+            objm[obj]['CPPFLAGS'] = ' '.join(args.get('CPPFLAGS', []))
+            objm[obj]['CPPDEFINES'] = ' '.join(
+                ['-D%s' % (i) for i in args.get('CPPDEFINES', [])])
+            objm[obj]['CPPPATH'] = ' '.join(
+                ['-I"%s"' % (self.relpath(i, silent=True)) for i in args.get('CPPPATH', [])])
+        self.w('\nall: %s/%s.exe\n' % (BUILD_DIR, self.appName))
+        self.w('%s/%s.exe: $(objs-y)\n' % (BUILD_DIR, self.appName))
+        self.w('\t@echo LD $@\n')
+        self.w('\t$Q $(LD) $(LINKFLAGS) $(objs-y) $(LIBS) $(LIBPATH) -o $@\n\n')
+        if 'S19' in self.env:
+            ss = self.env['S19'].split(' ')
+            ss[0] = os.path.basename(ss[0])
+            s19 = ' '.join(ss)
+            cmd = s19.format('%s/%s.exe' % (BUILD_DIR, self.appName),
+                             '%s/%s.s19' % (BUILD_DIR, self.appName))
+            self.w('\t$Q %s\n\n' % (cmd))
+        for d in objd:
+            self.w('%s:\n\tmkdir -p $@\n' % (d))
+        for obj, m in objm.items():
+            self.w('%s: %s\n' % (m['src'], m['d']))
+            self.w('%s: %s\n' % (obj, m['src']))
+            CC = 'CC'
+            if m['src'].endswith('.cpp'):
+                CC = 'CXX'
+            self.w('\t@echo %s $<\n' % (CC))
+            self.w('\t$Q $(%s) %s %s %s -c $< -o $@\n' %
+                   (CC, m['CPPFLAGS'], m['CPPDEFINES'], m['CPPPATH']))
+        self.w('\nclean:\n\t@rm -fv $(objs-y) %s/%s.exe\n\n' %
+               (BUILD_DIR, self.appName))
+        self.mkf.close()
+
+    def GenerateCMake(self, objs, **kwargs):
+        CPPPATH = []
+        LIBPATH = []
+        CPPDEFINES = []
+        LIBS = []
+        self.getKL(kwargs, 'LIBPATH', LIBPATH)
+        self.getKL(kwargs, 'LIBS', LIBS)
+        for _, kwargs in self.objs.items():
+            self.getKL(kwargs, 'CPPPATH', CPPPATH)
+            self.getKL(kwargs, 'LIBPATH', LIBPATH)
+            self.getKL(kwargs, 'CPPDEFINES', CPPDEFINES)
+        self.mkf = open('%s/CMakeLists.txt' % (self.WDIR), 'w')
+        self.w('# CMake for %s\n' % (self.appName))
+        self.w('#   cmake -G "Unix Makefiles" ..\n\n')
+        self.w('cmake_minimum_required(VERSION 3.2)\n\n')
+        self.w('PROJECT(%s)\n\n' % (self.appName))
+        self.w('SET(%s_SOURCES\n' % (self.appName.upper()))
+        for obj in self.objs:
+            self.w('  %s\n' % (self.relpath(str(obj))))
+        self.w(')\n\n')
+        self.w('SET(%s_LIBS\n' % (self.appName.upper()))
+        for x in LIBS:
+            self.w('  %s\n' % (x))
+        self.w(')\n\n')
+        self.w('SET(%s_LIBPATH\n' % (self.appName.upper()))
+        for x in LIBPATH:
+            self.w('  "%s"\n' % (self.relpath(x, silent=True)))
+        self.w(')\n\n')
+        self.w('SET(%s_INCLUDE\n' % (self.appName.upper()))
+        for x in CPPPATH:
+            self.w('  "%s"\n' % (self.relpath(x, silent=True)))
+        self.w(')\n\n')
+        self.w('SET(%s_DEFINES\n' % (self.appName.upper()))
+        for x in CPPDEFINES:
+            self.w('  %s\n' % (x))
+        self.w(')\n\n')
+        if getattr(self, 'shared', False):
+            self.w('add_library(%s SHARED ${%s_SOURCES})\n\n' % (
+                self.appName, self.appName.upper()))
+        else:
+            self.w('add_executable(%s ${%s_SOURCES})\n\n' % (
+                self.appName, self.appName.upper()))
+        self.w('target_link_libraries(%s PUBLIC ${%s_LIBS})\n\n' % (
+            self.appName, self.appName.upper()))
+        self.w('target_link_directories(%s PUBLIC ${%s_LIBPATH})\n\n' % (
+            self.appName, self.appName.upper()))
+        self.w('target_include_directories(%s PUBLIC ${%s_INCLUDE})\n\n' % (
+            self.appName, self.appName.upper()))
+        self.w('target_compile_definitions(%s PUBLIC ${%s_DEFINES})\n\n' % (
+            self.appName, self.appName.upper()))
+        self.w('add_custom_command(TARGET %s POST_BUILD\n' % (self.appName))
+        self.w('  COMMAND echo add the custom command here)\n')
+        self.mkf.close()
 
 
 def register_compiler(compiler):
@@ -516,8 +664,6 @@ def register_compiler(compiler):
 
     def create_compiler(**kwargs):
         env = compiler(**kwargs)
-        if isinstance(env, ReleaseEnv):
-            env = env.env
         if IsPlatformWindows():
             win32_spawn = Win32Spawn()
             env['SPAWN'] = win32_spawn.spawn
@@ -686,8 +832,7 @@ def CompilerCM0PGCC(**kwargs):
     return env
 
 
-@register_compiler
-def CompilerGCC(**kwargs):
+def __CompilerGCC(**kwargs):
     env = Environment(TOOLS=['ar', 'as', 'gcc', 'g++', 'gnulink'])
     env.Append(CFLAGS=['-std=gnu99'])
     env.Append(CPPFLAGS=['-Wall'])
@@ -695,7 +840,17 @@ def CompilerGCC(**kwargs):
         env.Append(CPPFLAGS=['-g'])
     if IsBuildForWindows():
         env.Append(LINKFLAGS=['-static'])
+    if IsPlatformTermux():
+        prefix = os.getenv('PREFIX')
+        env['CC'] = '%s/bin/clang' % (prefix)
+        env['CXX'] = '%s/bin/clang++' % (prefix)
+        env.Append(LIBS=['stdc++'])
     return env
+
+
+@register_compiler
+def CompilerGCC(**kwargs):
+    return __CompilerGCC(**kwargs)
 
 
 @register_compiler
@@ -812,6 +967,126 @@ if IsPlatformWindows():
             env['LINK'] = os.path.join(VC, 'link.exe')
             return env
 
+    @register_compiler
+    def Compilerx86GCC(**kwargs):
+        env = __CompilerGCC(**kwargs)
+        MSYS2 = os.getenv('MSYS2')
+        env['CC'] = '%s/mingw32/bin/gcc' % (MSYS2)
+        env['CXX'] = '%s/mingw32/bin/g++' % (MSYS2)
+        env['AR'] = '%s/mingw32/bin/ar' % (MSYS2)
+        env['LINK'] = '%s/mingw32/bin/gcc' % (MSYS2)
+        return env
+
+
+class QMakeEnv(CustomEnv):
+    def __init__(self):
+        super().__init__()
+        if IsPlatformWindows():
+            if os.path.isdir('C:/Qt'):
+                QTDIR = 'C:/Qt'
+            else:
+                QTDIR = os.getenv('QT_DIR')
+            exe = '.exe'
+        else:
+            QTDIR = os.getenv('QT_DIR')
+            exe = ''
+        if not os.path.isdir(QTDIR):
+            raise Exception('QT not found, set QT_DIR=/path/to/Qt')
+        self.qmake = Glob('%s/*/*/bin/qmake%s' % (QTDIR, exe))[0].rstr()
+        try:
+            self.winqtdeploy = Glob(
+                '%s/*/*/bin/windeployqt%s' % (QTDIR, exe))[0].rstr()
+        except:
+            pass
+        self.__installs__ = []
+        self.target = None
+
+    def Install(self, idir, objs):
+        idir = os.path.abspath('%s/%s' % (BUILD_DIR, idir))
+        MKDir(idir)
+        for obj in objs:
+            if type(obj) is str:
+                tgt = obj
+            else:
+                tgt = obj.get_abspath()
+            cmd = 'cp -v %s %s' % (tgt, idir)
+            os.system(cmd)
+            if self.target == obj:
+                cmd = '%s %s/%s' % (self.winqtdeploy, idir,
+                                    os.path.basename(tgt))
+                os.system(cmd)
+
+    def Program(self, appName, objs, **kwargs):
+        CPPPATH = []
+        LIBPATH = []
+        CPPDEFINES = []
+        LIBS = []
+        self.getKL(kwargs, 'CPPPATH', CPPPATH)
+        self.getKL(kwargs, 'LIBPATH', LIBPATH)
+        self.getKL(kwargs, 'LIBS', LIBS)
+        self.getKL(kwargs, 'CPPDEFINES', CPPDEFINES)
+        for _, kwargs in self.objs.items():
+            self.getKL(kwargs, 'CPPPATH', CPPPATH)
+            self.getKL(kwargs, 'LIBPATH', LIBPATH)
+            self.getKL(kwargs, 'CPPDEFINES', CPPDEFINES)
+        qpro = open('%s/%s.pro' % (BUILD_DIR, appName), 'w')
+        if getattr(self, 'shared', False):
+            qpro.write('TEMPLATE = lib\n')
+        qpro.write('QT += core gui widgets\n')
+        qpro.write('CONFIG += c++11\n')
+        qpro.write('CONFIG += console\n')
+        qpro.write('CONFIG += object_parallel_to_source\n')
+        qpro.write('DEFINES -= UNICODE _UNICODE\n')
+        qpro.write('INCLUDEPATH += %s\n\n' %
+                   ('    '.join(['"%s" \\\n' % (self.abspath(p)) for p in CPPPATH])))
+        qpro.write('DEFINES += %s\n\n' % (' '.join(CPPDEFINES)))
+        cppstr = 'SOURCES += \\\n'
+        hppstr = 'HEADERS += \\\n'
+        DLLS = []
+        for obj in objs:
+            if type(obj) is str and (obj.endswith('.dll') or obj.endswith('.so')):
+                DLLS.append(obj)
+        for dll in DLLS:
+            objs.remove(dll)
+            if dll.endswith('.dll'):
+                lib = os.path.basename(dll)[:-4]
+            if dll.endswith('.so'):
+                lib = os.path.basename(dll)[3:-3]
+            if lib not in LIBS:
+                LIBS.append(lib)
+                LIBPATH.append(os.path.dirname(dll))
+        for obj in objs:
+            rp = self.abspath(obj.rstr())
+            if rp.endswith('.hpp'):
+                hppstr += '    %s \\\n' % (rp)
+            else:
+                cppstr += '    %s \\\n' % (rp)
+        qpro.write(cppstr + '\n')
+        qpro.write(hppstr + '\n')
+        qpro.write('LIBS += %s\n\n' % (' '.join(['-l%s' % (l) for l in LIBS])))
+        qpro.write('LIBPATH += %s\n\n' %
+                   ('    '.join(['"%s" \\\n' % (self.abspath(p)) for p in LIBPATH])))
+        qpro.close()
+        cmd = '%s %s/%s.pro -spec win32-g++ "CONFIG+=debug"' % (
+            self.qmake, BUILD_DIR, appName)
+        RunCommand(cmd)
+        cmd = 'cd %s && make' % (BUILD_DIR)
+        RunCommand(cmd)
+        if getattr(self, 'shared', False):
+            if IsPlatformWindows():
+                target = '%s/debug/%s.dll' % (BUILD_DIR, appName)
+            else:
+                target = '%s/debug/lib%s.so' % (BUILD_DIR, appName)
+        else:
+            target = '%s/debug/%s.exe' % (BUILD_DIR, appName)
+            self.target = target
+        return [target]
+
+
+@ register_compiler
+def CompilerQMake(**kwargs):
+    return QMakeEnv()
+
 
 def CreateCompiler(name, **kwargs):
     if name in __compilers__:
@@ -878,8 +1153,24 @@ class BuildBase():
         self.__libs__ = {}
         self.__libs_order__ = []
         self.__extra_libs__ = []
-        for name in getattr(self, 'LIBS', []):
-            self.ensure_lib(name)
+        if getattr(self, 'prebuilt_shared', False):
+            CPPPATH = []
+            searched_libs = []
+            for name in getattr(self, 'LIBS', []):
+                if name not in __libraries__:
+                    if name not in self.__extra_libs__:
+                        self.__extra_libs__.append(name)
+                else:
+                    lib = __libraries__[name]()
+                    CPPPATH += lib.get_includes(searched_libs)
+            include = getattr(self, 'include', [])
+            if type(include) is str:
+                self.include = [include] + CPPPATH
+            else:
+                self.include = include + CPPPATH
+        else:
+            for name in getattr(self, 'LIBS', []):
+                self.ensure_lib(name)
 
     def init_base(self):
         self.CPPPATH = []
@@ -887,12 +1178,37 @@ class BuildBase():
         self.include = []
         self.LIBS = []
         self.CPPDEFINES = []
-        self.source = []
+        self.CPPFLAGS = []
 
     def AddPostAction(self, action):
         if not hasattr(self, '__post_actions__'):
             self.__post_actions__ = []
         self.__post_actions__.append(action)
+
+    def Install(self, idir, files=None):
+        if files != None:
+            idir = os.path.join(BUILD_DIR, idir)
+            for f in files:
+                if os.path.isdir(f):
+                    dst = os.path.join(idir, os.path.basename(f))
+                    if os.path.isdir(dst):
+                        print('rm -r %s'%(dst))
+                        shutil.rmtree(dst)
+                    print('cp -r %s %s'%(f, dst))
+                    shutil.copytree(f, dst)
+                else:
+                    print('cp %s %s'%(f, idir))
+                    shutil.copy(f, idir)
+            return
+        if getattr(self, '__install__dirs__', None) is None:
+            self.__install__dirs__ = []
+        self.__install__dirs__.append(idir)
+
+    def do_install(self, target):
+        env = self.ensure_env()
+        idirs = getattr(self, '__install__dirs__', [])
+        for idir in idirs:
+            env.Install(idir, target)
 
     def Append(self, **kwargs):
         env = self.ensure_env()
@@ -915,6 +1231,8 @@ class BuildBase():
         env.ParseConfig(cmd)
 
     def ensure_env(self):
+        if getattr(self, 'user', None):
+            return self.user.ensure_env()
         if self.env is None:
             cplName = getattr(self, 'compiler', GetOption('compiler'))
             if cplName not in __compilers__:
@@ -1003,7 +1321,7 @@ class BuildBase():
 
     def get_libs(self):
         libs = {}
-        if getattr(self, 'user', None) and not getattr(self, 'shared', False):
+        if getattr(self, 'user', None):
             libs = self.user.get_libs()
         else:
             libs = self.__libs__
@@ -1049,19 +1367,29 @@ class Library(BuildBase):
         self.__cfgs__ = {}
         self.user = kwargs.get('user', None)
         self.env = kwargs.get('env', None)
+        self.top = kwargs.get('top', False)
         compiler = kwargs.get('compiler', getattr(self, 'compiler', None))
         if compiler != None:
             self.compiler = compiler
-        self.init_base()
+        if False == getattr(self, 'typed_class', False):
+            self.init_base()
         self.config()
-        if hasattr(self, 'INCLUDE'):
-            self.include = self.INCLUDE
         if GetOption('prebuilt') and GetOption('library') != self.name:
             liba = os.path.abspath('%s/../prebuilt/lib%s.a' %
                                    (BUILD_DIR, self.name))
             if os.path.isfile(liba):
                 self.source = [liba]
-        if self.include != None and len(self.include):
+            else:
+                if IsBuildForWindows():
+                    dll = os.path.abspath('%s/../prebuilt/%s.dll' %
+                                          (BUILD_DIR, self.name))
+                else:
+                    dll = os.path.abspath('%s/../prebuilt/lib%s.so' %
+                                          (BUILD_DIR, self.name))
+                if os.path.isfile(dll):
+                    self.source = [dll]
+                    self.prebuilt_shared = True
+        if hasattr(self, 'include') and len(self.include):
             self.RegisterCPPPATH('$%s' % (self.name), self.include)
         super().__init__()
 
@@ -1108,7 +1436,7 @@ class Library(BuildBase):
                     pass
         objs = []
         for c in self.source:
-            if str(c).endswith('.a'):
+            if str(c).endswith('.a') or str(c).endswith('.dll') or str(c).endswith('.so'):
                 objs.append(c)
             elif self.is_shared_library():
                 objs += env.SharedObject(c, CPPPATH=CPPPATH,
@@ -1129,19 +1457,26 @@ class Library(BuildBase):
             objs += lib.objs()
             LIBPATH += getattr(lib, 'LIBPATH', [])
         if self.is_shared_library():
-            LIBS = env.get('LIBS', []) + self.__extra_libs__
+            LIBS = []
             LINKFLAGS = getattr(self, 'LINKFLAGS', []) + \
                 env.get('LINKFLAGS', [])
             objs2 = []
             for obj in objs:
-                if not str(obj).endswith('.a'):
-                    objs2.append(obj)
-                else:
+                if str(obj).endswith('.a'):
                     name = os.path.basename(obj)[3:-2]
                     LIBPATH.append(os.path.dirname(obj))
-                    LIBS.insert(0, name)
-            return env.SharedLibrary(libName, objs2, LIBPATH=LIBPATH, LIBS=LIBS, LINKFLAGS=LINKFLAGS)
-        return env.Library(libName, objs)
+                    LIBS.append(name)
+                else:
+                    objs2.append(obj)
+            LIBS += env.get('LIBS', []) + self.__extra_libs__
+            target = env.SharedLibrary(
+                libName, objs2, LIBPATH=LIBPATH, LIBS=LIBS, LINKFLAGS=LINKFLAGS)
+        else:
+            target = env.Library(libName, objs)
+        for action in getattr(self, '__post_actions__', []):
+            env.AddPostAction(target, action)
+        self.do_install(target)
+        return target
 
 
 class Driver(Library):
@@ -1165,6 +1500,9 @@ class Application(BuildBase):
                 raise Exception('Invalid OS %s' % (TARGET_OS))
             self.LIBS += [TARGET_OS]
             self.Append(CPPDEFINES=['USE_%s' % (TARGET_OS.upper())])
+            if TARGET_OS != 'OSAL':
+                self.LIBS += ['OSAL']
+                self.Append(CPPDEFINES=['USE_OSAL'])
         super().__init__()
 
     def build(self):
@@ -1186,7 +1524,7 @@ class Application(BuildBase):
         for name in self.__libs_order__:
             if self.__libs__[name].is_shared_library():
                 aslog('build shared library %s' % (name))
-                self.__libs__[name].build()
+                objs += self.__libs__[name].build()
                 continue
             aslog('build library %s' % (name))
             objs_ = self.__libs__[name].objs()
@@ -1232,26 +1570,27 @@ class Application(BuildBase):
             env.AddPostAction(target, action)
         for action in getattr(self, '__post_actions__', []):
             env.AddPostAction(target, action)
+        self.do_install(target)
 
 
 class Qemu():
     def __init__(self, arch='arm64'):
         arch_map = {'x86': 'i386', 'cortex-m': 'arm', 'arm64': 'aarch64'}
         self.arch = arch
-        self.port = self.FindPort()
-        self.portCAN0 = self.FindPort(self.port+1)
-        self.params = '-serial tcp:127.0.0.1:%s,server -serial tcp:127.0.0.1:%s,server' % (
-            self.port, self.portCAN0)
+        self.portCAN0 = self.FindPort()
+        self.params = '-serial stdio -serial tcp:127.0.0.1:%s,server' % (
+            self.portCAN0)
         if('gdb' in COMMAND_LINE_TARGETS):
             self.params += ' -gdb tcp::1234 -S'
         if(self.arch in arch_map.keys()):
             self.arch = arch_map[self.arch]
         self.qemu = self.FindQemu()
 
-    def FindPort(self, port=1103):
+    def FindPort(self, port=9000):
         import socket
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        while(port < 2000):
+        portMAX = port + 1000
+        while(port < portMAX):
             try:
                 sock.bind(("127.0.0.1", port))
                 break
@@ -1267,73 +1606,8 @@ class Qemu():
         return qemu
 
     def Run(self, params):
-        import threading
-        self.is_running = True
-        t1 = threading.Thread(target=self.thread_stdio, args=())
-        t2 = threading.Thread(target=self.thread_can0, args=())
-        t1.start()
-        t2.start()
         cmd = '%s %s %s' % (self.qemu, params, self.params)
         RunCommand(cmd)
-        self.is_running = False
-        t1.join()
-        t2.join()
-        exit(0)
-
-    def thread_stdio(self):
-        import socket
-        import time
-        import keyboard
-        import threading
-        time.sleep(3)
-        self.com = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.com.connect(('127.0.0.1', self.port))
-        self.com.settimeout(0.001)
-        print('QEMU: UART terminal online')
-
-        def thread_key():
-            while(self.is_running):
-                p = keyboard.read_key()
-                self.com.send(p.encode('utf-8'))
-                time.sleep(1)
-        t1 = threading.Thread(target=thread_key, args=())
-        t1.start()
-        while(self.is_running):
-            try:
-                d = self.com.recv(4096)
-                if (len(d)):
-                    print(d.decode('utf-8'), end='')
-            except socket.timeout:
-                pass
-        t1.join()
-
-    def thread_can0(self):
-        import socket
-        import time
-        time.sleep(3)
-        self.canbus = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.canbus.connect(('127.0.0.1', 80))
-        self.canbus.settimeout(0.001)
-        self.can0 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.can0.connect(('127.0.0.1', self.portCAN0))
-        self.can0.settimeout(0.001)
-        while(self.is_running):
-            try:
-                frame = self.canbus.recv(69)
-                while((len(frame) < 69) and (len(frame) > 0)):
-                    frame += self.canbus.recv(69-len(frame))
-                if (len(frame) == 69):
-                    self.can0.send(frame)
-            except socket.timeout:
-                pass
-            try:
-                frame = self.can0.recv(69)
-                while((len(frame) < 69) and (len(frame) > 0)):
-                    frame += self.can0.recv(69-len(frame))
-                if (len(frame) == 69):
-                    self.canbus.send(frame)
-            except socket.timeout:
-                pass
 
 
 def Building():

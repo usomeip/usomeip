@@ -15,7 +15,6 @@ extern "C" {
 #define TCPIP_AF_INET ((TcpIp_DomainType)0x02)
 #define TCPIP_AF_INET6 ((TcpIp_DomainType)0x1c)
 
-
 #define TCPIP_E_NOSPACE ((Std_ReturnType)0x10)
 
 /* ================================ [ TYPES     ] ============================================== */
@@ -74,10 +73,16 @@ Std_ReturnType TcpIp_SetupAddrFrom(TcpIp_SockAddrType *RemoteAddrPtr, const char
 
 Std_ReturnType TcpIp_GetLocalIp(TcpIp_SockAddrType *addr);
 
+Std_ReturnType TcpIp_GetLocalAddr(TcpIp_SocketIdType SocketId, TcpIp_SockAddrType *addr);
+
 /* @SWS_TCPIP_00026 */
 void TcpIp_MainFunction(void);
 
 TcpIp_SocketIdType TcpIp_Create(TcpIp_ProtocolType protocol);
+
+Std_ReturnType TcpIp_SetNonBlock(TcpIp_SocketIdType SocketId, boolean nonBlocked);
+
+Std_ReturnType TcpIp_SetTimeout(TcpIp_SocketIdType SocketId, uint32_t timeoutMs);
 
 /* @SWS_TCPIP_00017 */
 Std_ReturnType TcpIp_Close(TcpIp_SocketIdType SocketId, boolean Abort);
@@ -98,15 +103,15 @@ Std_ReturnType TcpIp_TcpAccept(TcpIp_SocketIdType SocketId, TcpIp_SocketIdType *
 Std_ReturnType TcpIp_IsTcpStatusOK(TcpIp_SocketIdType SocketId);
 
 Std_ReturnType TcpIp_Recv(TcpIp_SocketIdType SocketId, uint8_t *BufPtr,
-                          uint16_t *Length /* InOut */);
+                          uint32_t *Length /* InOut */);
 
 Std_ReturnType TcpIp_RecvFrom(TcpIp_SocketIdType SocketId, TcpIp_SockAddrType *RemoteAddrPtr,
-                              uint8_t *BufPtr, uint16_t *Length /* InOut */);
+                              uint8_t *BufPtr, uint32_t *Length /* InOut */);
 
 Std_ReturnType TcpIp_SendTo(TcpIp_SocketIdType SocketId, const TcpIp_SockAddrType *RemoteAddrPtr,
-                            const uint8_t *BufPtr, uint16_t Length);
+                            const uint8_t *BufPtr, uint32_t Length);
 
-Std_ReturnType TcpIp_Send(TcpIp_SocketIdType SocketId, const uint8_t *BufPtr, uint16_t Length);
+Std_ReturnType TcpIp_Send(TcpIp_SocketIdType SocketId, const uint8_t *BufPtr, uint32_t Length);
 
 /*
  * Idel: The time (in seconds) the connection needs to remain idle before TCP starts sending

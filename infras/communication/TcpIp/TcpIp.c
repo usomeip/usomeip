@@ -21,12 +21,15 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include <errno.h>
+#include <sys/time.h>
+#include <time.h>
 #elif defined(_WIN32) && !defined(USE_LWIP)
 #include <Ws2tcpip.h>
 #include <windows.h>
 #include <winsock2.h>
 #include <ws2def.h>
 #include <errno.h>
+#include <iphlpapi.h>
 #else
 #include "lwip/opt.h"
 #include "lwip/sys.h"
@@ -62,6 +65,7 @@
 #ifdef USE_LWIP
 static struct netif netif;
 #endif
+static boolean lInitialized = FALSE;
 /* ================================ [ LOCALS    ] ============================================== */
 #ifdef USE_LWIP
 static void init_default_netif(const ip4_addr_t *ipaddr, const ip4_addr_t *netmask,
@@ -104,24 +108,114 @@ static void tcpIpInit(void *arg) { /* remove compiler warning */
   sys_sem_signal(init_sem);
 }
 #endif
+
+#if defined(_WIN32) && !defined(USE_LWIP)
+#define MALLOC(x) HeapAlloc(GetProcessHeap(), 0, (x))
+#define FREE(x) HeapFree(GetProcessHeap(), 0, (x))
+Std_ReturnType TcpIp_GetAdapterAddress(uint32_t number, TcpIp_SockAddrType *addr) {
+  Std_ReturnType ret = E_OK;
+  DWORD dwRetVal = 0;
+  int i = 0;
+  ULONG flags = GAA_FLAG_INCLUDE_PREFIX;
+  ULONG family = AF_INET;
+  PIP_ADAPTER_ADDRESSES pAddresses = NULL;
+  ULONG outBufLen = 0;
+  ULONG Iterations = 0;
+
+  PIP_ADAPTER_ADDRESSES pCurrAddresses = NULL;
+  PIP_ADAPTER_UNICAST_ADDRESS pUnicast = NULL;
+
+  // Allocate a 15 KB buffer to start with.
+  outBufLen = 15000;
+
+  do {
+    pAddresses = (IP_ADAPTER_ADDRESSES *)MALLOC(outBufLen);
+    if (pAddresses == NULL) {
+      printf("Memory allocation failed for IP_ADAPTER_ADDRESSES struct\n");
+      ret = E_NOT_OK;
+    }
+
+    dwRetVal = GetAdaptersAddresses(family, flags, NULL, pAddresses, &outBufLen);
+
+    if (dwRetVal == ERROR_BUFFER_OVERFLOW) {
+      FREE(pAddresses);
+      pAddresses = NULL;
+      ret = E_NOT_OK;
+    } else {
+      break;
+    }
+
+    if (number == Iterations) {
+      break;
+    }
+
+    Iterations++;
+
+  } while ((dwRetVal == ERROR_BUFFER_OVERFLOW) && (Iterations < 3));
+
+  Iterations = 0;
+  ret = E_NOT_OK;
+  if (dwRetVal == NO_ERROR) {
+    // If successful, output some information from the data we received
+    pCurrAddresses = pAddresses;
+    while (pCurrAddresses) {
+      if (IfOperStatusUp == pCurrAddresses->OperStatus) {
+        if (pCurrAddresses->PhysicalAddressLength != 0) {
+          printf("Adapter[%d]: ", (int)Iterations);
+          for (i = 0; i < (int)pCurrAddresses->PhysicalAddressLength; i++) {
+            if (i == (pCurrAddresses->PhysicalAddressLength - 1))
+              printf("%.2X\n", (int)pCurrAddresses->PhysicalAddress[i]);
+            else
+              printf("%.2X-", (int)pCurrAddresses->PhysicalAddress[i]);
+          }
+        } else {
+          printf("Adapter[%d]: localhost\n", (int)Iterations);
+        }
+        pUnicast = pCurrAddresses->FirstUnicastAddress;
+        if (pUnicast != NULL) {
+          for (i = 0; pUnicast != NULL; i++) {
+            uint8_t *ipaddr = (uint8_t *)&pUnicast->Address.lpSockaddr->sa_data[2];
+            printf("\tUnicast[%d]: %u.%u.%u.%u\n", i, ipaddr[0], ipaddr[1], ipaddr[2], ipaddr[3]);
+            if ((i == 0) && (Iterations == number)) {
+              memcpy(addr->addr, ipaddr, 4);
+              ret = E_OK;
+            }
+            pUnicast = pUnicast->Next;
+          }
+        }
+        Iterations++;
+      }
+      pCurrAddresses = pCurrAddresses->Next;
+    }
+  }
+
+  if (pAddresses) {
+    FREE(pAddresses);
+  }
+  return ret;
+}
+#endif
 /* ================================ [ FUNCTIONS ] ============================================== */
 void TcpIp_Init(const TcpIp_ConfigType *ConfigPtr) {
+  if (FALSE == lInitialized) {
 #ifdef USE_LWIP
-  sys_sem_t init_sem;
-  sys_sem_new(&init_sem, 0);
-  tcpip_init(tcpIpInit, &init_sem);
-  sys_sem_wait(&init_sem);
-  sys_sem_free(&init_sem);
+    sys_sem_t init_sem;
+    sys_sem_new(&init_sem, 0);
+    tcpip_init(tcpIpInit, &init_sem);
+    sys_sem_wait(&init_sem);
+    sys_sem_free(&init_sem);
 #ifdef linux
-  /* ref https://wiki.qemu.org/Documentation/Networking#Tap
-   * route add -nv 224.224.224.245 dev tap0
-   * route add -nv 224.224.224.245 dev enp0s3
-   */
+    /* ref https://wiki.qemu.org/Documentation/Networking#Tap
+     * route add -nv 224.224.224.245 dev tap0
+     * route add -nv 224.224.224.245 dev enp0s3
+     */
 #endif
 #elif defined(_WIN32)
-  WSADATA wsaData;
-  WSAStartup(MAKEWORD(2, 2), &wsaData);
+    WSADATA wsaData;
+    WSAStartup(MAKEWORD(2, 2), &wsaData);
 #endif
+    lInitialized = TRUE;
+  }
 }
 
 void TcpIp_MainFunction(void) {
@@ -133,9 +227,6 @@ void TcpIp_MainFunction(void) {
 TcpIp_SocketIdType TcpIp_Create(TcpIp_ProtocolType protocol) {
   TcpIp_SocketIdType sockId;
   int type;
-#if defined(_WIN32) && !defined(USE_LWIP)
-  u_long iMode = 1;
-#endif
   int on = 1;
 
   if (TCPIP_IPPROTO_TCP == protocol) {
@@ -148,17 +239,53 @@ TcpIp_SocketIdType TcpIp_Create(TcpIp_ProtocolType protocol) {
   if (sockId >= 0) {
     setsockopt(sockId, SOL_SOCKET, SO_REUSEADDR, (char *)&on, sizeof(int));
     if (TCPIP_IPPROTO_UDP == protocol) {
-#if defined(_WIN32) && !defined(USE_LWIP)
-      ioctlsocket(sockId, FIONBIO, &iMode);
-#else
-      ioctl(sockId, FIONBIO, &on);
-#endif
+      TcpIp_SetNonBlock(sockId, TRUE);
     }
   }
 
   ASLOG(TCPIP, ("[%d] %s created\n", sockId, type == SOCK_STREAM ? "TCP" : "UDP"));
 
   return sockId;
+}
+
+Std_ReturnType TcpIp_SetNonBlock(TcpIp_SocketIdType SocketId, boolean nonBlocked) {
+  Std_ReturnType ret = E_OK;
+  int r;
+#if defined(_WIN32) && !defined(USE_LWIP)
+  u_long iMode = (u_long)nonBlocked;
+  r = ioctlsocket(SocketId, FIONBIO, &iMode);
+#else
+  int on = (int)nonBlocked;
+  r = ioctl(SocketId, FIONBIO, &on);
+#endif
+
+  if (0 != r) {
+    ASLOG(TCPIPE, ("[%d] set non block falied: %d\n", SocketId, r));
+    ret = E_NOT_OK;
+  }
+
+  return ret;
+}
+
+Std_ReturnType TcpIp_SetTimeout(TcpIp_SocketIdType SocketId, uint32_t timeoutMs) {
+  Std_ReturnType ret = E_OK;
+  int r;
+#if defined(linux) || defined(USE_LWIP)
+  struct timeval tv;
+  tv.tv_sec = 0;
+  tv.tv_usec = timeoutMs * 1000;
+  r = setsockopt(SocketId, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof tv);
+#elif defined(_WIN32)
+  DWORD timeout = timeoutMs;
+  r = setsockopt(SocketId, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout, sizeof timeout);
+#endif
+
+  if (0 != r) {
+    ASLOG(TCPIPE, ("[%d] set timeout falied: %d\n", SocketId, r));
+    ret = E_NOT_OK;
+  }
+
+  return ret;
 }
 
 Std_ReturnType TcpIp_Close(TcpIp_SocketIdType SocketId, boolean Abort) {
@@ -185,29 +312,31 @@ Std_ReturnType TcpIp_Bind(TcpIp_SocketIdType SocketId, const char *LocalAddr, ui
   int r;
 #ifdef USE_LWIP
   ip_addr_t ipaddr;
+  int on = 1;
 #endif
   struct ip_mreq mreq;
   struct sockaddr_in sLocalAddr;
-#if defined(_WIN32) && !defined(USE_LWIP)
-  u_long iMode = 1;
-  ioctlsocket(SocketId, FIONBIO, &iMode);
-#else
-  int on = 1;
-  ioctl(SocketId, FIONBIO, &on);
+#if (defined(_WIN32) || defined(linux)) && !defined(USE_LWIP)
+  TcpIp_SockAddrType sAddr;
 #endif
 #ifdef USE_LWIP
   setsockopt(SocketId, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(int)); /* Set socket to no delay */
 #endif
-  /*Source*/
+
   memset((char *)&sLocalAddr, 0, sizeof(sLocalAddr));
   sLocalAddr.sin_family = AF_INET;
 #ifdef USE_LWIP
   sLocalAddr.sin_len = sizeof(sLocalAddr);
 #endif
+#if (defined(_WIN32) || defined(linux)) && !defined(USE_LWIP)
+  TcpIp_GetLocalIp(&sAddr);
+  memcpy(&sLocalAddr.sin_addr.s_addr, sAddr.addr, 4);
+#else
   sLocalAddr.sin_addr.s_addr = htonl(INADDR_ANY);
+#endif
   sLocalAddr.sin_port = htons(Port);
 
-  ASLOG(TCPIP, ("[%d] bind to :%d\n", SocketId, Port));
+  ASLOG(TCPIP, ("[%d] bind to :%d\n", SocketId, LocalAddr ?: "null", Port));
   r = bind(SocketId, (struct sockaddr *)&sLocalAddr, sizeof(sLocalAddr));
   if ((0 == r) && (LocalAddr != NULL)) {
 #ifndef USE_LWIP
@@ -231,6 +360,9 @@ Std_ReturnType TcpIp_Bind(TcpIp_SocketIdType SocketId, const char *LocalAddr, ui
 
   if (0 != r) {
     ret = E_NOT_OK;
+    ASLOG(TCPIPE, ("[%d] bind to %s:%d failed: %d\n", SocketId, LocalAddr, Port, r));
+  } else {
+    TcpIp_SetNonBlock(SocketId, TRUE);
   }
 
   return ret;
@@ -283,6 +415,8 @@ Std_ReturnType TcpIp_TcpListen(TcpIp_SocketIdType SocketId, uint16_t MaxChannels
   r = listen(SocketId, MaxChannels);
   if (0 == r) {
     ret = E_OK;
+  } else {
+    ASLOG(TCPIPE, ("[%d] listen failed: %d\n", SocketId, r));
   }
   ASLOG(TCPIP, ("[%d] listen(%d) \n", SocketId, MaxChannels));
 
@@ -300,13 +434,7 @@ Std_ReturnType TcpIp_TcpAccept(TcpIp_SocketIdType SocketId, TcpIp_SocketIdType *
 
   if (clientFd >= 0) {
     /* New connection established */
-#if defined(_WIN32) && !defined(USE_LWIP)
-    u_long iMode = 1;
-    ioctlsocket(clientFd, FIONBIO, &iMode);
-#else
-    int on = 1;
-    ioctl(clientFd, FIONBIO, &on);
-#endif
+    TcpIp_SetNonBlock(clientFd, TRUE);
 
     TcpIp_TcpKeepAlive(clientFd, 10, 1, 3);
     RemoteAddrPtr->port = htons(client_addr.sin_port);
@@ -341,7 +469,7 @@ Std_ReturnType TcpIp_IsTcpStatusOK(TcpIp_SocketIdType SocketId) {
 }
 
 Std_ReturnType TcpIp_Recv(TcpIp_SocketIdType SocketId, uint8_t *BufPtr,
-                          uint16_t *Length /* InOut */) {
+                          uint32_t *Length /* InOut */) {
   Std_ReturnType ret = E_OK;
   int nbytes;
 
@@ -362,7 +490,7 @@ Std_ReturnType TcpIp_Recv(TcpIp_SocketIdType SocketId, uint8_t *BufPtr,
 }
 
 Std_ReturnType TcpIp_RecvFrom(TcpIp_SocketIdType SocketId, TcpIp_SockAddrType *RemoteAddrPtr,
-                              uint8_t *BufPtr, uint16_t *Length /* InOut */) {
+                              uint8_t *BufPtr, uint32_t *Length /* InOut */) {
   Std_ReturnType ret = E_OK;
   struct sockaddr_in fromAddr;
   socklen_t fromAddrLen = sizeof(fromAddr);
@@ -390,7 +518,7 @@ Std_ReturnType TcpIp_RecvFrom(TcpIp_SocketIdType SocketId, TcpIp_SockAddrType *R
 }
 
 Std_ReturnType TcpIp_SendTo(TcpIp_SocketIdType SocketId, const TcpIp_SockAddrType *RemoteAddrPtr,
-                            const uint8_t *BufPtr, uint16_t Length) {
+                            const uint8_t *BufPtr, uint32_t Length) {
   Std_ReturnType ret = E_OK;
   struct sockaddr_in toAddr;
   socklen_t toAddrLen = sizeof(toAddr);
@@ -421,7 +549,7 @@ Std_ReturnType TcpIp_SendTo(TcpIp_SocketIdType SocketId, const TcpIp_SockAddrTyp
   return ret;
 }
 
-Std_ReturnType TcpIp_Send(TcpIp_SocketIdType SocketId, const uint8_t *BufPtr, uint16_t Length) {
+Std_ReturnType TcpIp_Send(TcpIp_SocketIdType SocketId, const uint8_t *BufPtr, uint32_t Length) {
   Std_ReturnType ret = E_OK;
   int nbytes;
 
@@ -452,15 +580,14 @@ Std_ReturnType TcpIp_TcpConnect(TcpIp_SocketIdType SocketId,
 
   r = connect(SocketId, (struct sockaddr *)&addr, sizeof(struct sockaddr));
   if (0 == r) {
-#if defined(_WIN32) && !defined(USE_LWIP)
-    u_long iMode = 1;
-    ioctlsocket(SocketId, FIONBIO, &iMode);
-#else
-    int on = 1;
-    ioctl(SocketId, FIONBIO, &on);
-#endif
+    TcpIp_SetNonBlock(SocketId, TRUE);
     ret = E_OK;
+  } else {
+    ASLOG(TCPIPE, ("[%d] connect %d.%d.%d.%d:%d failed: %d\n", SocketId, RemoteAddrPtr->addr[0],
+                   RemoteAddrPtr->addr[1], RemoteAddrPtr->addr[2], RemoteAddrPtr->addr[3],
+                   RemoteAddrPtr->port, r));
   }
+
   ASLOG(TCPIP,
         ("[%d] connect %d.%d.%d.%d:%d\n", SocketId, RemoteAddrPtr->addr[0], RemoteAddrPtr->addr[1],
          RemoteAddrPtr->addr[2], RemoteAddrPtr->addr[3], RemoteAddrPtr->port));
@@ -500,12 +627,53 @@ Std_ReturnType TcpIp_GetLocalIp(TcpIp_SockAddrType *addr) {
 
   ip = getenv("AS_LOCAL_IP");
   if (NULL == ip) {
-    ip = "172.18.0.1";
+#ifdef _WIN32
+    TcpIp_SockAddrType addr;
+    static char lIPStr[64];
+    static bool lGeted = FALSE;
+    static bool lAvaiable = FALSE;
+    if (FALSE == lGeted) {
+      if (E_OK == TcpIp_GetAdapterAddress(0, &addr)) {
+        snprintf(lIPStr, sizeof(lIPStr), "%d.%d.%d.%d", addr.addr[0], addr.addr[1], addr.addr[2],
+                 addr.addr[3]);
+        ASLOG(WARN, ("env AS_LOCAL_IP not set, using adapter 0, IP is %s\n", lIPStr));
+        lAvaiable = TRUE;
+      }
+      lGeted = TRUE;
+    }
+    if (lAvaiable) {
+      ip = lIPStr;
+    } else {
+#endif
+      ip = "172.18.0.1";
+      ASLOG(WARN, ("env AS_LOCAL_IP not set, default %s\n", ip));
+#ifdef _WIN32
+    }
+#endif
   }
   u32Addr = inet_addr(ip);
   memcpy(addr->addr, &u32Addr, 4);
   return E_OK;
 #endif
+}
+
+Std_ReturnType TcpIp_GetLocalAddr(TcpIp_SocketIdType SocketId, TcpIp_SockAddrType *addr) {
+  Std_ReturnType ret = E_NOT_OK;
+  int r;
+  struct sockaddr_in name;
+  socklen_t namelen = sizeof(name);
+
+  r = getsockname(SocketId, (struct sockaddr *)&name, &namelen);
+  if (0 == r) {
+    addr->port = htons(name.sin_port);
+    memcpy(addr->addr, &name.sin_addr, 4);
+    ret = E_OK;
+
+    ASLOG(TCPIP, ("[%d] sockname %d.%d.%d.%d:%d\n", SocketId, addr->addr[0], addr->addr[1],
+                  addr->addr[2], addr->addr[3], addr->port));
+  }
+
+  return ret;
 }
 
 uint16_t TcpIp_Tell(TcpIp_SocketIdType SocketId) {
