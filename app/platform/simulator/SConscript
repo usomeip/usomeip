@@ -1,0 +1,12 @@
+from building import *
+
+objs = Glob('src/*.c')
+
+
+@register_library
+class LibrarySimulator(Library):
+    def config(self):
+        if not IsBuildForAndroid():
+            self.LIBS.append('pthread')
+        self.CPPPATH = ['$INFRAS']
+        self.source = objs
