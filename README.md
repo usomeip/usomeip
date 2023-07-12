@@ -1,3 +1,6 @@
+# please go to use https://github.com/autoas/ssas-public
+# This repo is not activily supported, but all the source code is mirrored from https://github.com/autoas/ssas-public
+
 # uSOMEIP -- micro SOMEIP
 
 Those codes is mirrored from https://github.com/autoas/ssas-public, and this library is source open for SOMEIP study&research, but not free for any other commercial usage.
